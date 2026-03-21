@@ -1,0 +1,24 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+    environment:
+      # Timezone: TZ for the container; GENERIC_TIMEZONE for Schedule Trigger etc.
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-America/Montevideo}
+      - TZ=${TZ:-America/Montevideo}
+      # Recommended by n8n Docker docs (Code node execution, file permissions)
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_RUNNERS_ENABLED=true
+      # URL n8n advertises for OAuth redirects (Gmail, Google Drive) and links
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      # Optional: set a fixed key so credentials stay decryptable across clean deploys
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:-}
+    restart: unless-stopped
+
+volumes:
+  n8n_data:

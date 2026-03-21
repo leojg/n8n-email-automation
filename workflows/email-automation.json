@@ -1,0 +1,282 @@
+{
+  "name": "n8n-email-automation",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "q": "subject: New job",
+          "readStatus": "unread",
+          "sender": "donotreply@upwork.com"
+        }
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        -160
+      ],
+      "id": "77beef4f-4778-4c96-a797-70964f792910",
+      "name": "Gmail Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "documentURL": "https://docs.google.com/document/d/YOUR_GOOGLE_DOC_ID/edit"
+      },
+      "type": "n8n-nodes-base.googleDocs",
+      "typeVersion": 2,
+      "position": [
+        400,
+        -160
+      ],
+      "id": "38a2d2be-b723-414e-a5ee-ca447570ff20",
+      "name": "Get a document"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1008,
+        -16
+      ],
+      "id": "6e524f4f-64b5-4e48-8869-8a7dfd4d5e9d",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/messages/{{ $json.id }}?format=full",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "gmailOAuth2",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        400,
+        0
+      ],
+      "id": "5b78715a-c492-46c4-9d50-8caff684721f",
+      "name": "Get full email"
+    },
+    {
+      "parameters": {
+        "jsCode": "const parts = $('Get full email').first().json.payload.parts || [];\nconst textPart = parts.find(p => p.mimeType === 'text/plain');\nconst raw = textPart.body.data.replace(/-/g, '+').replace(/_/g, '/');\nconst rawBody = decodeURIComponent(escape(atob(raw)));\n\n\n// Strip everything after the footer separator\nconst content = rawBody.split('You received this email')[0];\n\n// Clean up whitespace and carriage returns\nconst clean = content\n  .replace(/\\r\\n/g, '\\n')\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .replace(/----------/g, '')\n  .trim();\n\n// Extract the job URL\nconst urlMatch = clean.match(/https:\\/\\/www\\.upwork\\.com\\/jobs\\/~\\d+/);\nconst jobUrl = urlMatch ? urlMatch[0] : null;\n\n// Strip tracking URLs and tag links, keep just the text\nconst stripped = clean\n  .replace(/https?:\\/\\/\\S+/g, '')  // remove all URLs\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .trim();\n\nreturn {\n  json: {\n    posting: stripped,\n    jobUrl: jobUrl\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        544,
+        0
+      ],
+      "id": "9b3ae71c-39ac-4f5f-b96f-8e458f8bd889",
+      "name": "Email cleanup"
+    },
+    {
+      "parameters": {
+        "jsCode": "const posting = $('Email cleanup').first().json.posting;\nconst jobUrl = $('Email cleanup').first().json.jobUrl;\nconst profile = $('Get a document').first().json.content;\n\nconst systemPrompt = `You are a job posting triage agent for a freelance developer. Your task is to score Upwork job postings against the developer's profile and preferences.\n\n<developer_profile>\n${profile}\n</developer_profile>\n\nScore the posting from 1-5:\n5 = Strong match, apply immediately\n4 = Worth a look, aligns with goals\n3 = Borderline, surface but flag concerns\n2 = Weak fit, only if nothing better\n1 = Skip entirely\n\nRespond ONLY with valid JSON, no markdown, no preamble:\n{\n  \"score\": 3,\n  \"category\": \"strong_match | worth_a_look | skip\",\n  \"rationale\": \"One sentence explaining why\",\n  \"concerns\": \"One sentence on yellow/red flags, or null\"\n}\n\nRules:\n- Use the Rate Thresholds, Skip list, and Client Credibility Signals from the profile strictly\n- If the posting matches any Skip criteria, score 1 and category \"skip\"\n- If client credibility has red flags, score 1 and category \"skip\"\n- Be harsh — surfacing noise wastes the developer's time\n- Do NOT wrap the response in markdown code fences or backticks`;\n\nconst userMessage = `<upwork_posting>\n${posting}\n</upwork_posting>`;\n\nreturn {\n  json: {\n    requestBody: {\n      model: \"claude-haiku-4-5-20251001\",\n      max_tokens: 256,\n      system: systemPrompt,\n      messages: [\n        {\n          role: \"user\",\n          content: userMessage\n        }\n      ]\n    },\n    jobUrl: jobUrl\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        848,
+        -16
+      ],
+      "id": "8ff5f8be-d4e9-451b-90c5-6748040d54b1",
+      "name": "prompt builder"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\n\nconst raw = response.content[0].text;\nconst clean = raw.replace(/```json\\n?/g, '').replace(/```\\n?/g, '').trim();\nconst result = JSON.parse(clean);\n\nconst jobUrl = $('prompt builder').first().json.jobUrl;\nconst posting = $('Email cleanup').first().json.posting;\n\n// Filter out low scores\nif (result.score < 3) {\n  return [];  // empty array = n8n stops this branch\n}\n\n// Star rating visual\nconst stars = '⭐'.repeat(result.score);\n\n// Build Telegram message\nconst message = `${stars} Score: ${result.score}/5\n\n${result.rationale}\n\n${result.concerns ? `⚠️ ${result.concerns}` : ''}\n\n---\n${posting.split('\\n').slice(0, 10).join('\\n')}\n\n🔗 ${jobUrl || 'No link found'}`;\n\nreturn {\n  json: {\n    message: message,\n    score: result.score,\n    category: result.category,\n    inputTokens: response.usage.input_tokens,\n    outputTokens: response.usage.output_tokens\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1168,
+        -16
+      ],
+      "id": "7b6ed9aa-e8ea-4f25-a173-f0ef9c98e480",
+      "name": "response cleanup"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $json.message }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1312,
+        -16
+      ],
+      "id": "9f2f227b-c9fc-4d39-adfb-53415045cb8a",
+      "name": "Send a text message"
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $json.id }}"
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        208,
+        96
+      ],
+      "id": "8db97a5c-9b22-4421-abe0-e1bfa17be868",
+      "name": "Mark a message as read"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        704,
+        -16
+      ],
+      "id": "7d0e3037-648c-4476-9f63-4b8efa4e3a03",
+      "name": "Merge"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get a document",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Mark a message as read",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get full email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get a document": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get full email": {
+      "main": [
+        [
+          {
+            "node": "Email cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email cleanup": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "prompt builder": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "response cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "response cleanup": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark a message as read": {
+      "main": [
+        []
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "prompt builder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
